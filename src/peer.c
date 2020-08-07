@@ -108,8 +108,9 @@ fd_status_t on_peer_ready_recv(int sockfd) {
 					log_info("msg recv: %s", msg->data);
 					peerstate->sendbuf[0] = 'O';
 					peerstate->sendbuf[1] = 'K';
+					peerstate->sendbuf[2] = '\n';
 					peerstate->sendptr = 0;
-					peerstate->sendbuf_end = 2;
+					peerstate->sendbuf_end = 3;
 					ready_to_send = true;
 				}
 			}
