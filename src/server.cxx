@@ -79,5 +79,53 @@ ServerContext::ServerContext(std::string addr, uint16_t port) {
 }
 
 int ServerContext::run_server() {
-		
+	thread = std::thread(&ServerContext::epoll_loop_event, this);
+	return 0;
 }
+
+int ServerContext::epoll_loop_event() {
+	log_set_thread_name("Server Thread");
+	int rc = listen(sockfd, SOMAXCONN);
+	if(rc == -1) {
+			log_perror("listen");
+		return -1;
+	}
+	while(1) {
+		int n, i;
+		n = epoll_wait(epollfd, events, EPOLL_MAX_EVENTS, -1);
+		for(i = 0; i < n; i++) {
+			if(events[i].events & EPOLLERR) {
+				log_perror("epoll error");
+				int error = 0;
+				socklen_t errlen = sizeof(error);
+				if(getsockopt(events[i].data.fd, SOL_SOCKET, SO_ERROR, (void*)&error, &errlen) == 0) {
+					log_error("%s\n", strerror(error));
+				}
+				close(events[i].data.fd);
+				continue;
+			}
+			else if(sockfd == events[i].data.fd) {
+				// Event is from server sock.
+				struct sockaddr_in peer_addr;
+				socklen_t peer_addr_len = sizeof(peer_addr);
+				int newsockfd = accept(ctx->sock, (struct sockaddr*)&peer_addr, &peer_addr_len);
+				if(newsockfd < 0) {
+					if(errno == EAGAIN || errno == EWOULDBLOCK) {
+						log_error("accept returned EAGAIN or EWOULDBLOCK\n");
+					} else {
+						log_perror("accept");
+						return -1;
+					}
+				} else {
+					non_block(newsockfd);
+					if(newsockfd >= MAXFDS) {
+						log_error("socket fd (%d) >= MAXFDS (%d)", newsockfd, MAXFDS);
+						return -1;
+					}
+				}
+			}
+		}
+	}
+}
+
+// vim: set ts=4 sw=4 tw=0 noet :

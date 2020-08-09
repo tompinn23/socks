@@ -22,6 +22,11 @@
 
 #include "log.h"
 
+#include <unordered_map>
+#include <stdexcept>
+#include <string>
+#include <thread>
+
 #include <errno.h>
 #include <string.h>
 #define MAX_CALLBACKS 32
@@ -40,6 +45,10 @@ static struct {
   Callback callbacks[MAX_CALLBACKS];
 } L;
 
+static struct {
+	std::unordered_map<std::thread::id, std::string> thread_names;	
+} threads;
+
 
 static const char *level_strings[] = {
   "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"
@@ -55,31 +64,45 @@ static const char *level_colors[] = {
 static void stdout_callback(log_Event *ev) {
   char buf[16];
   buf[strftime(buf, sizeof(buf), "%H:%M:%S", ev->time)] = '\0';
+  std::string thread_name;
+  try{ 
+  	thread_name = threads.thread_names.at(std::this_thread::get_id());
+    thread_name = " // " + thread_name;	
+  } catch(std::out_of_range& e) {
+	thread_name = "";	
+  }
 #ifdef LOG_USE_COLOR
   fprintf(
-    ev->udata, "%s %s%-5s\x1b[0m \x1b[90m%s:%d:\x1b[0m ",
-    buf, level_colors[ev->level], level_strings[ev->level],
+    (FILE*)ev->udata, "%s [%s%-5s\x1b[0m%s] \x1b[90m%s:%d:\x1b[0m ",
+    buf, level_colors[ev->level], level_strings[ev->level], thread_name.c_str(), 
     ev->file, ev->line);
 #else
   fprintf(
     ev->udata, "%s %-5s %s:%d: ",
     buf, level_strings[ev->level], ev->file, ev->line);
 #endif
-  vfprintf(ev->udata, ev->fmt, ev->ap);
-  fprintf(ev->udata, "\n");
-  fflush(ev->udata);
+  vfprintf((FILE*)ev->udata, ev->fmt, ev->ap);
+  fprintf((FILE*)ev->udata, "\n");
+  fflush((FILE*)ev->udata);
 }
 
 
 static void file_callback(log_Event *ev) {
   char buf[64];
   buf[strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", ev->time)] = '\0';
+  std::string thread_name;
+  try{ 
+  	thread_name = threads.thread_names.at(std::this_thread::get_id());
+    thread_name = " // " + thread_name;	
+  } catch(std::out_of_range& e) {
+	thread_name = "";	
+  }
   fprintf(
-    ev->udata, "%s %-5s %s:%d: ",
-    buf, level_strings[ev->level], ev->file, ev->line);
-  vfprintf(ev->udata, ev->fmt, ev->ap);
-  fprintf(ev->udata, "\n");
-  fflush(ev->udata);
+    (FILE*)ev->udata, "%s [%-5s%s] %s:%d: ",
+    buf, level_strings[ev->level], thread_name.c_str(), ev->file, ev->line);
+  vfprintf((FILE*)ev->udata, ev->fmt, ev->ap);
+  fprintf((FILE*)ev->udata, "\n");
+  fflush((FILE*)ev->udata);
 }
 
 
@@ -138,6 +161,9 @@ static void init_event(log_Event *ev, void *udata) {
   ev->udata = udata;
 }
 
+void log_set_thread_name(const char* thread_name) {
+	threads.thread_names[std::this_thread::get_id()] = thread_name;
+}
 
 void log__perror(int level, const char* file, int line, const char* msg) {
 	log_log(level, file, line, "%s: %s", msg, strerror(errno));

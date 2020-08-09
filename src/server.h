@@ -10,7 +10,7 @@ public:
 	int run_server();
 	int stop_server();
 private:
-	int epoll_loop_event(void* udata);
+	int epoll_loop_event();
 
 	int sockfd;
 	std::thread thread;
