@@ -1,10 +1,9 @@
 #pragma once
 
 #include <stdint.h>
+#include <deque>
 
-typedef struct {
+struct message_t {
 	int sockfd;
-	uint8_t* data;
-	int data_ptr;
-	int data_len;
-} message_t;
+	std::deque<uint8_t> buf;
+};

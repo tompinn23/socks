@@ -36,7 +36,6 @@ static int non_block(int sfd) {
 	return 0;
 }
 
-
 ServerContext::ServerContext(std::string addr, uint16_t port) {
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if(sockfd == -1) {
@@ -66,7 +65,6 @@ ServerContext::ServerContext(std::string addr, uint16_t port) {
 	}
 
 	struct epoll_event event;
-	struct epoll_event* events;
 	event.data.fd = sockfd;
 	event.events = EPOLLIN;
 	rc = epoll_ctl(epollfd, EPOLL_CTL_ADD, sockfd, &event);
@@ -76,6 +74,9 @@ ServerContext::ServerContext(std::string addr, uint16_t port) {
 	}
 	
 	events = new struct epoll_event[EPOLL_MAX_EVENTS];
+	peer_state = new Peer[MAXFDS];
+	messages_left = 0;
+	out_message_store.resize(MAX_MESSAGE_STORE);
 }
 
 int ServerContext::run_server() {
@@ -91,8 +92,27 @@ int ServerContext::epoll_loop_event() {
 		return -1;
 	}
 	while(1) {
+		if(messages_left < 0) messages_left = 0;
+		if(messages_left == 0) {
+			messages_left = message_queue_out.try_dequeue_bulk(&out_message_store[0], MAX_MESSAGE_STORE);
+		}
+		if(messages_left > 0) {
+			for(auto &a : out_message_store) {
+				Peer& p = peer_state[a.sockfd];
+				if(p.sendbuf.size() < SENDBUF_SIZE) {
+					int copy_size = SENDBUF_SIZE - p.sendbuf.size();
+					std::copy(a.buf.begin(), a.buf.begin() + copy_size, p.sendbuf.begin() + p.sendbuf.size());
+					a.buf.erase(a.buf.begin(), a.buf.begin() + copy_size);
+				}
+				if(a.buf.empty()) messages_left--;
+			}
+		}
 		int n, i;
-		n = epoll_wait(epollfd, events, EPOLL_MAX_EVENTS, -1);
+		n = epoll_wait(epollfd, events, EPOLL_MAX_EVENTS, 250);
+		if(n < 0) {
+			log_perror("epoll_wait");
+			return -1;
+		}
 		for(i = 0; i < n; i++) {
 			if(events[i].events & EPOLLERR) {
 				log_perror("epoll error");
@@ -108,7 +128,7 @@ int ServerContext::epoll_loop_event() {
 				// Event is from server sock.
 				struct sockaddr_in peer_addr;
 				socklen_t peer_addr_len = sizeof(peer_addr);
-				int newsockfd = accept(ctx->sock, (struct sockaddr*)&peer_addr, &peer_addr_len);
+				int newsockfd = accept(sockfd, (struct sockaddr*)&peer_addr, &peer_addr_len);
 				if(newsockfd < 0) {
 					if(errno == EAGAIN || errno == EWOULDBLOCK) {
 						log_error("accept returned EAGAIN or EWOULDBLOCK\n");
@@ -122,10 +142,76 @@ int ServerContext::epoll_loop_event() {
 						log_error("socket fd (%d) >= MAXFDS (%d)", newsockfd, MAXFDS);
 						return -1;
 					}
+					fd_status_t status = peer_state[newsockfd].on_peer_connected(newsockfd, &peer_addr, peer_addr_len);
+					struct epoll_event event = {0};
+					event.data.fd = newsockfd;
+					if(status.want_read) {
+						event.events |= EPOLLIN;
+					}
+					if(status.want_write) {
+						event.events |= EPOLLOUT;
+					}
+					
+					if(epoll_ctl(epollfd, EPOLL_CTL_ADD, newsockfd, &event) < 0) {
+						log_perror("epoll_ctl EPOLL_CTL_ADD");
+						return -1;
+					}
 				}
+				continue;
+			} else {
+				if(events[i].events & EPOLLIN) {
+					int fd = events[i].data.fd;
+					fd_status_t status = peer_state[fd].on_peer_ready_recv(*this, fd);
+					struct epoll_event event = {0};
+					event.data.fd = fd;
+					if(status.want_read) {
+						event.events |= EPOLLIN;
+					}
+					if(status.want_write) {
+						event.events |= EPOLLOUT;
+					}
+					if(event.events == 0) {
+						log_info("socket %d closing");
+						if(epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL) < 0) {
+							log_perror("epoll_ctl EPOLL_CTL_DEL");
+							return -1;
+						}
+						peer_state[fd].on_peer_close(fd);
+						close(fd);
+					} else if(epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event) < 0) {
+						log_perror("epoll_ctl EPOLL_CTL_MOD");
+						return -1;
+					}
+				} else if (events[i].events & EPOLLOUT) {
+					// Ready for writing.
+					int fd = events[i].data.fd;
+					fd_status_t status = peer_state[fd].on_peer_ready_write(*this, fd);
+					struct epoll_event event = {0};
+					event.data.fd = fd;
+					if (status.want_read) {
+						event.events |= EPOLLIN;
+					}
+					if (status.want_write) {
+						event.events |= EPOLLOUT;
+					}
+					if(!status.no_change) {
+						if (event.events == 0) {
+							printf("socket %d closing\n", fd);
+							if (epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL) < 0) {
+								log_perror("epoll_ctl EPOLL_CTL_DEL");
+								return -1;
+							}
+							peer_state[fd].on_peer_close(fd);
+							close(fd);
+						} else if (epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event) < 0) {
+							log_perror("epoll_ctl EPOLL_CTL_MOD");
+							return -1;
+						}
+					}
+				}   
 			}
 		}
 	}
+	return 0;
 }
-
 // vim: set ts=4 sw=4 tw=0 noet :
